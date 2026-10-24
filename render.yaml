@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: skimms-kavach
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - { key: NODE_ENV, value: production }
+      - { key: ADMIN_PASS, sync: false }
+      - { key: SECRET, generateValue: true }
+      - { key: WORKERS_JSON, sync: false }

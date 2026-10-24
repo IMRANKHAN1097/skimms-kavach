@@ -1,0 +1,24 @@
+// 9 end-to-end checks. Starts its own server on a temp data dir.
+const{spawn}=require('child_process'),os=require('os'),fs=require('fs'),path=require('path'),WebSocket=require('ws');
+const PORT=3301,U=`http://localhost:${PORT}`,dir=fs.mkdtempSync(path.join(os.tmpdir(),'sk-'));
+const srv=spawn('node',['server.js'],{env:{...process.env,PORT,DATA_DIR:dir,ADMIN_PASS:'testpass',SECRET:'test-secret-123',ESCALATE_S:'3'},stdio:'ignore'});
+const call=async(p,{m,b,t,k}={})=>{const r=await fetch(U+p,{method:m||(b?'POST':'GET'),headers:{'content-type':'application/json',...(t&&{authorization:'Bearer '+t}),...(k&&{'x-device-key':k})},body:b&&JSON.stringify(b)});let j;const x=await r.text();try{j=JSON.parse(x)}catch{j=x}return{s:r.status,j}};
+const pkt=(o={})=>({board_id:'ESP32_NODE_01',battery:90,gps:{valid:true,lat:22.57,lng:88.36},sensors:{mq4:380,mq135:261,accel:9.8,ir:49107,...o},status:{missing:0,env_hazard:!!o.gas,health_hazard:false}});
+let pass=0,n=0;const ok=(name,c)=>{n++;if(c){pass++;console.log('PASS',name)}else console.log('FAIL',name)};
+(async()=>{await new Promise(r=>setTimeout(r,1200));
+  ok('1 unregistered helmet -> 403',(await call('/api/telemetry',{b:pkt()})).s===403);
+  const a=(await call('/api/admin/login',{b:{username:'admin',password:'testpass'}})).j.token;
+  ok('2 bad PIN rejected',(await call('/api/admin/workers',{t:a,b:{esp32_id:'ESP32_NODE_01',helmet_number:'=HLM-1',worker_name:'Ravi',worker_pin:'12',area:'S3'}})).s===400);
+  const reg=await call('/api/admin/workers',{t:a,b:{esp32_id:'ESP32_NODE_01',helmet_number:'=HLM-1',worker_name:'Ravi',worker_pin:'1234',area:'Sector 3'}});const key=reg.j.worker&&reg.j.worker.device_key;
+  ok('3 registration returns device key',reg.s===201&&!!key);
+  ok('4 wrong device key -> 401',(await call('/api/telemetry',{b:pkt(),k:'nope'})).s===401);
+  const w=(await call('/api/worker/login',{b:{esp32_id:'ESP32_NODE_01',pin:'1234'}})).j.token;
+  ok('5 worker login + own status',(await call('/api/worker/status',{t:w})).j.worker.area==='Sector 3');
+  const lv=[];for(let i=0;i<3;i++)lv.push((await call('/api/telemetry',{b:pkt({mq4:3000,gas:1}),k:key})).j.ai_status);
+  ok('6 debounce CAUTION,CAUTION then DANGER',lv.join()==='CAUTION,CAUTION,DANGER');
+  const al=(await call('/api/alerts',{t:a})).j;ok('7 alert raised + acknowledge works',al.length===1&&(await call(`/api/alerts/${al[0].id}/ack`,{m:'POST',t:a})).j.success===true);
+  const csv=(await call('/api/alerts/export-csv',{t:a})).j;ok('8 CSV neutralises formulas, admin only',typeof csv==='string'&&csv.includes('"\'=HLM-1"')&&(await call('/api/alerts/export-csv',{t:w})).s===403);
+  const rot=(await call('/api/admin/workers/ESP32_NODE_01/rotate-key',{m:'POST',t:a})).j.new_device_key;
+  const anon=(await call('/api/alerts')).s===401;const wsBad=await new Promise(r=>{const x=new WebSocket(`ws://localhost:${PORT}/ws`);x.on('close',()=>r(true));x.on('open',()=>setTimeout(()=>r(false),500))});
+  ok('9 rotated key revokes old; anonymous API/WebSocket blocked',(await call('/api/telemetry',{b:pkt(),k:key})).s===401&&(await call('/api/telemetry',{b:pkt(),k:rot})).s===200&&anon&&wsBad);
+  console.log(`\n${pass}/${n} passed`);srv.kill();process.exit(pass===n?0:1)})();
